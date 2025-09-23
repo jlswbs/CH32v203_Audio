@@ -1,0 +1,90 @@
+/*
+The MIT License (MIT)
+
+Copyright (c) 2017 Leonardo Laguna Ruiz
+-----
+Comb filter resonator
+*/
+
+fun change(x:real):bool {
+    mem pre_x;
+    val v:bool = pre_x <> x;
+    pre_x = x;
+    return v;
+}
+
+fun dcblock(x0){
+  mem x1,y1;
+  val y0 = x0-x1+y1*0.995;
+  x1,y1 = x0,y0;
+  return y0;
+}
+
+fun soft(x1) {
+   mem x2,x3,x4;
+   val o = (x1+x2+x3+x4)/4.0;
+   x2,x3,x4 = x1,x2,x3;
+   return o;
+}
+
+fun cvToPitch(cv) {
+   return cv * 120.0 + 24.0;
+}
+
+fun cvToperiod(cv) @[table(size=32,min=0.0,max=1.0)] {
+   val pitch = cvToPitch(cv);
+   val f = 8.175798915643707 * exp(0.057762265046662105 * pitch);
+   return 22050.0 / f / 2.0;
+}
+
+fun tanh_table(x) @[table(min = -24.0, max = 24.0, size = 241)] {
+  return 16.0 * tanh(x / 16.0);
+}
+
+fun saturate_soft(x) {
+  return tanh_table(x);
+}
+
+fun tanh_table2(x:real) @[table(min = -24.0, max = 24.0, size = 241)]{
+  return tanh(x);
+}
+
+fun saturate(x) {
+   return tanh_table2(x);
+}
+
+fun delayx(x:real, cv:real) : real {
+   mem buffer : array(real, 1000);
+   mem write_pos = (write_pos+1) % size(buffer);
+   _ = set(buffer, write_pos, x);
+   // Gets the position in the buffer to read
+   val r_size = real(size(buffer));
+   val r_index  = (real(write_pos) - cvToperiod(cv)) % r_size;
+   r_index = if r_index < 0.0 then r_size + r_index else r_index;
+   val t1 = int(floor(r_index)) % size(buffer);
+   val t2 = (t1 + 1) % size(buffer);
+   // Gets the decimal part of the position
+   val decimal  = r_index - real(t1);
+   // Reads the values in the buffer
+   val x1 = get(buffer,t1);
+   val x2 = get(buffer,t2);
+   // Interpolates the value
+   val ret = (x2-x1) * decimal + x1;
+   return ret;
+}
+
+fun toneCurve(tone) @[table(min=-1.2,max=1.2,size=64)] {
+   val sign = if tone < 0.0 then -1.0 else 1.0;
+   return sign * sqrt(abs(tone));
+}
+
+fun process(in, cv, tone, res) {
+   mem output, stone;
+   if(change(tone)){
+      stone = toneCurve(tone);
+   }
+   val feedback = dcblock(output * res);
+   val saturated_input = saturate_soft(in + feedback);
+   output = stone * delayx(saturated_input, soft(cv)) + in;
+   return saturate(output);
+}
