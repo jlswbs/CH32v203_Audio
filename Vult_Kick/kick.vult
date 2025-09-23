@@ -1,0 +1,202 @@
+/*
+The MIT License (MIT)
+
+Copyright (c) 2017 Leonardo Laguna Ruiz
+-----
+Drum synth in the 909 kick style
+*/
+
+fun edge(x:bool) : bool {
+   mem pre;
+   val ret = x && not(pre);
+   pre = x;
+   return ret;
+}
+
+fun change(x:real):bool {
+    mem pre_x;
+    val v:bool = pre_x <> x;
+    pre_x = x;
+    return v;
+}
+
+fun pitchToRate_1024(pitch) @[table(size=32,min=0.0,max=127.0)] {
+   return 0.18984168003671556 * exp(0.057762265046662105 * pitch);
+}
+
+fun cvToPitch(cv) {
+   return cv * 120.0 + 24.0;
+}
+
+fun cvToRate_1024(cv) @[table(size=32,min=0.0,max=0.9)] {
+   return pitchToRate_1024(cvToPitch(cv));
+}
+
+fun tanh_table(x:real) @[table(min = -24.0, max = 24.0, size = 241)]{
+  return tanh(x);
+}
+
+fun saturate(x) {
+   return tanh_table(x);
+}
+
+fun pinker(x:real){
+   mem w1;
+   val b0 = 0.02771298631913731;
+   val b1 = 0.02771298631913731;
+   val a1 = -0.9445740273617255;
+   val w0 = x - a1*w1;
+   val y0 = b0*w0 + b1*w1;
+   w1 = w0;
+   return y0;
+}
+
+fun noise(color) {
+   mem x1 = (x1 * 17389 + 7919) % 32768;
+   val y1 = real(x1)/32768.0;
+   mem x2 = (x2 * 27449 + 12553) % 32768;
+   val y2 = real(x2)/32768.0;
+   val out = if color>0.5 then pinker(y1-y2) else y1-y2;
+   return 2.0*out;
+}
+
+fun tricore(cv:real, reset:real, disable:real) : real {
+   mem rate;
+   mem reset_state;
+   mem phase, reset_phase;
+   mem direction;
+   val out = 0.0;
+   // Calculate the rate only when the cv changes
+   if(change(cv)) {
+      rate = 4.0 * cvToRate_1024(cv);
+   }
+   // Determine the next value
+   val new_phase = phase + if direction then rate else -rate;
+
+   val bdisable = disable > 0.5;
+
+   // if reset or disable were triggered, then enter reset state
+   if(edge(reset > 0.0) || edge(bdisable)) {
+      // this is gonna be the initial value from which the oscillator starts resetting
+      reset_phase = phase;
+      // enter the reset state
+      reset_state = true;
+      new_phase = 0.0;
+   }
+
+   // wrap the phase in both directions
+   if(new_phase > 1024.0) {
+      new_phase = 1024.0 - (new_phase - 1024.0);
+      direction = false;
+   }
+   else if(new_phase < -1024.0) {
+      direction = true;
+      new_phase = -1024.0 + (new_phase + 1024.0);
+   }
+   // update the phase, if disabled just make it zero
+   phase = if bdisable then 0.0 else new_phase;
+
+   if(reset_state) {
+      // exponentially reduce the value until, if it's reseted and not dissable
+      // when the value is very small goes out of reset state
+      if(abs(reset_phase) > 10.0 || bdisable) {
+         // dissable produces a softer transition
+         val reset_speed = if bdisable then 0.01 else 0.5;
+         reset_phase = reset_phase - reset_phase * reset_speed;
+      }
+      else {
+         reset_phase = if reset_phase > 10.0 then reset_phase else 0.0;
+         reset_state = false;
+         direction = true;
+      }
+      out = reset_phase;
+   }
+   // the output is the sum of the ideal saw wave and the reset transition
+   out = out + phase;
+   return out / 1024.0;
+} 
+
+fun swept(gate, start, end, rate) {
+   mem out;
+   val a_rate = 1.0 / (100.0 * rate + 0.01);
+   val bgate = gate > 0.5;
+   out = out + ((end *  1024.0) - out) * rate * 0.004;
+   if(edge(bgate))
+      out = start * 1024.0;
+   return out/1024.0;
+}
+
+fun ahr(gate:real, a:real, h:real, r:real) {
+   mem state;
+   mem out;
+   mem rate;
+   mem target;
+   mem hold_phase;
+
+   val release = 0;
+   val attack  = 1;
+   val hold    = 2;
+   val reset   = 3;
+
+   val bgate = gate > 0.0;
+
+   if(edge(bgate)) {
+      state = reset;
+   }
+
+   val resetting = if state == reset then 1.0 else 0.0;
+
+   // transitions
+
+   if(edge(out > 1024.0)) {
+      hold_phase = 0.0;
+      state = hold;
+   }
+   if(out < 10.0 && state == reset) {
+      state = attack;
+   }
+   if(hold_phase > 100.0 && state == hold) {
+      state = release;
+   }
+
+   // states
+
+   if(state == reset) {
+      rate = 1.0 / (100.0 * 0.01 + 0.01);
+      target = 0.0;
+   }
+   if(state == attack) {
+      rate = 1.0 / (100.0 * a + 0.01);
+      target = 1.2 * 1024.0;
+   }
+   if(state == hold) {
+      val hrate = 1.0 / (100.0 * h + 0.01);
+      hold_phase = hold_phase + hrate;
+   }
+   if(state == release) {
+      rate = 1.0 / (100.0 * r + 0.01);
+      target = 0.0;
+   }
+
+   out = out + (target - out) * rate * 0.005;
+
+
+   return clip(out/1024.0,0.0,1.0), resetting;
+}
+
+fun process(gate, odecay, pitch, swept, noise) {
+   // Envelope of the drum. One parameter affects the hold and relase
+   val osc_env, env_reset = ahr(gate, 0.005, 0.1 + odecay ,odecay+0.01);
+   // Change of pitch
+   val cv = swept(1.0-env_reset, pitch + swept*0.4, pitch, 0.1);
+   // Main triangle oscillator
+   // Note: the oscillator is dissabled while the nevelop resets
+   val osc = tricore(cv, 0.0, env_reset);
+   // Saturates the triangle to get a sine with some harmonics
+   val osc_sat = saturate(1.5 *  osc);
+
+   val noise_env, _ = ahr(gate, 0.001, 0.01, noise * 0.01+0.001);
+   val noise_osc = noise * noise(1.0) / 3.0;
+
+   return osc_env * osc_sat + noise_env * noise_osc;
+}
