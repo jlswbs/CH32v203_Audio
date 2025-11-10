@@ -1,4 +1,4 @@
-// Floating point Wavequide synthesis - pin PA3 audio output //
+// Waveguide synthesis - pin PA3 audio output //
 
 #include <HardwareTimer.h>
 
@@ -21,6 +21,7 @@ float step = 1.0f;
 uint16_t N = 128;
 
 float lp1 = 0.0f, lp2 = 0.0f;
+
 inline float lowpass2(float in) {
     lp1 = lp1 + lowpass * (in - lp1);
     lp2 = lp2 + lowpass * (lp1 - lp2);
@@ -76,7 +77,7 @@ void timerHandler(void) {
     fractionalIdx += step;
     if (fractionalIdx >= N) fractionalIdx -= N;
 
-	TIM2->CH4CVR = uint8_t(127*(out+1.0f));
+	TIM2->CH4CVR = uint8_t(127.0f * (out + 1.0f));
 
 }
 
